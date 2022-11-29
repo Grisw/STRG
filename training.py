@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from utils import AverageMeter, calculate_accuracy
+from utils import AverageMeter, calculate_accuracy, calculate_precision_and_recall_and_f1
 
 
 def freeze_bn(model):
@@ -47,6 +47,7 @@ def train_epoch(epoch,
     data_time = AverageMeter()
     losses = AverageMeter()
     accuracies = AverageMeter()
+    f1s = AverageMeter()
 
     end_time = time.time()
     for i, (inputs, targets) in enumerate(data_loader):
@@ -80,9 +81,11 @@ def train_epoch(epoch,
             outputs = model(inputs)
         loss = criterion(outputs, targets)
         acc = calculate_accuracy(outputs, targets)
+        precision, recall, f1 = calculate_precision_and_recall_and_f1(outputs, targets)
 
         losses.update(loss.item(), inputs.size(0))
         accuracies.update(acc, inputs.size(0))
+        f1s.update(f1, inputs.size(0))
 
         optimizer.zero_grad()
         loss.backward()
@@ -98,6 +101,7 @@ def train_epoch(epoch,
                 'iter': (epoch - 1) * len(data_loader) + (i + 1),
                 'loss': losses.val,
                 'acc': accuracies.val,
+                'f1': f1s.val,
                 'lr': current_lr
             })
         if i % 20 == 0:
@@ -105,13 +109,15 @@ def train_epoch(epoch,
                 'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                 'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                 'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                'Acc {acc.val:.3f} ({acc.avg:.3f})'.format(epoch,
+                'Acc {acc.val:.3f} ({acc.avg:.3f})\t'
+                'F1 {f1.val:.3f} ({f1.avg:.3f})'.format(epoch,
                                                             i + 1,
                                                             len(data_loader),
                                                             batch_time=batch_time,
                                                             data_time=data_time,
                                                             loss=losses,
-                                                            acc=accuracies))
+                                                            acc=accuracies,
+                                                            f1=f1s))
 
     if distributed:
         loss_sum = torch.tensor([losses.sum],
@@ -126,24 +132,35 @@ def train_epoch(epoch,
         acc_count = torch.tensor([accuracies.count],
                                  dtype=torch.float32,
                                  device=device)
+        f1_count = torch.tensor([f1s.count],
+                                dtype=torch.float32,
+                                device=device)
+        f1_sum = torch.tensor([f1s.sum],
+                              dtype=torch.float32,
+                              device=device)
 
         dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(loss_count, op=dist.ReduceOp.SUM)
         dist.all_reduce(acc_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(acc_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(f1_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(f1_count, op=dist.ReduceOp.SUM)
 
         losses.avg = loss_sum.item() / loss_count.item()
         accuracies.avg = acc_sum.item() / acc_count.item()
+        f1s.avg = f1_sum.item() / f1_count.item()
 
     if epoch_logger is not None:
         epoch_logger.log({
             'epoch': epoch,
             'loss': losses.avg,
             'acc': accuracies.avg,
+            'f1': f1s.avg,
             'lr': current_lr
         })
 
     if tb_writer is not None:
         tb_writer.add_scalar('train/loss', losses.avg, epoch)
         tb_writer.add_scalar('train/acc', accuracies.avg, epoch)
+        tb_writer.add_scalar('train/f1', f1s.avg, epoch)
         tb_writer.add_scalar('train/lr', current_lr, epoch)

@@ -5,7 +5,7 @@ import pdb
 import torch
 import torch.distributed as dist
 
-from utils import AverageMeter, calculate_accuracy
+from utils import AverageMeter, calculate_accuracy, calculate_precision_and_recall_and_f1
 
 
 def val_epoch(epoch,
@@ -29,6 +29,7 @@ def val_epoch(epoch,
     data_time = AverageMeter()
     losses = AverageMeter()
     accuracies = AverageMeter()
+    f1s = AverageMeter()
 
     end_time = time.time()
 
@@ -65,9 +66,11 @@ def val_epoch(epoch,
 
             loss = criterion(outputs, targets)
             acc = calculate_accuracy(outputs, targets)
+            precision, recall, f1 = calculate_precision_and_recall_and_f1(outputs, targets)
 
             losses.update(loss.item(), inputs.size(0))
             accuracies.update(acc, inputs.size(0))
+            f1s.update(f1, inputs.size(0))
 
             batch_time.update(time.time() - end_time)
             end_time = time.time()
@@ -76,14 +79,16 @@ def val_epoch(epoch,
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Acc {acc.val:.3f} ({acc.avg:.3f})'.format(
+                  'Acc {acc.val:.3f} ({acc.avg:.3f})\t'
+                  'F1 {f1.val:.3f} ({f1.avg:.3f})'.format(
                       epoch,
                       i + 1,
                       len(data_loader),
                       batch_time=batch_time,
                       data_time=data_time,
                       loss=losses,
-                      acc=accuracies))
+                      acc=accuracies,
+                      f1=f1s))
 
     if distributed:
         loss_sum = torch.tensor([losses.sum],
@@ -98,20 +103,30 @@ def val_epoch(epoch,
         acc_count = torch.tensor([accuracies.count],
                                  dtype=torch.float32,
                                  device=device)
+        f1_count = torch.tensor([f1s.count],
+                                dtype=torch.float32,
+                                device=device)
+        f1_sum = torch.tensor([f1s.sum],
+                              dtype=torch.float32,
+                              device=device)
 
         dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(loss_count, op=dist.ReduceOp.SUM)
         dist.all_reduce(acc_sum, op=dist.ReduceOp.SUM)
         dist.all_reduce(acc_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(f1_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(f1_count, op=dist.ReduceOp.SUM)
 
         losses.avg = loss_sum.item() / loss_count.item()
         accuracies.avg = acc_sum.item() / acc_count.item()
+        f1s.avg = f1_sum.item() / f1_count.item()
 
     if logger is not None:
-        logger.log({'epoch': epoch, 'loss': losses.avg, 'acc': accuracies.avg})
+        logger.log({'epoch': epoch, 'loss': losses.avg, 'acc': accuracies.avg, 'f1': f1s.avg})
 
     if tb_writer is not None:
         tb_writer.add_scalar('val/loss', losses.avg, epoch)
         tb_writer.add_scalar('val/acc', accuracies.avg, epoch)
+        tb_writer.add_scalar('val/f1', f1s.avg, epoch)
 
     return losses.avg
